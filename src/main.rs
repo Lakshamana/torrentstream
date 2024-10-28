@@ -33,7 +33,7 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
         // is list
         let mut inner_elm = &encoded_value[1..];
         let mut values = Vec::<serde_json::Value>::new();
-        let mut cut = 0 as usize;
+        let mut skip = 0 as usize;
 
         while inner_elm != "" && !inner_elm.starts_with('e') {
             let (decoded_value, rest) = decode_bencoded_value(inner_elm);
@@ -43,12 +43,36 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
             inner_elm = rest;
 
             if inner_elm.starts_with('e') {
-                cut = 1;
+                skip = 1;
                 break;
             }
         }
 
-        (serde_json::Value::Array(values), &inner_elm[cut..])
+        (serde_json::Value::Array(values), &inner_elm[skip..])
+    } else if encoded_value.starts_with('d') {
+        // is list
+        let mut inner_elm = &encoded_value[1..];
+        let mut map = serde_json::Map::new();
+        let mut skip = 0 as usize;
+
+        while inner_elm != "" && !inner_elm.starts_with('e') {
+            let (decoded_key, rest_key) = decode_bencoded_value(inner_elm);
+            let (decoded_value, rest_value) = decode_bencoded_value(rest_key);
+
+            let end_idx = decoded_key.to_string().as_str()[1..].find('"').unwrap();
+            map.insert(
+                decoded_key.to_string().as_str()[1..end_idx + 1].to_string(),
+                decoded_value,
+            );
+            inner_elm = rest_value;
+
+            if inner_elm.starts_with('e') {
+                skip = 1;
+                break;
+            }
+        }
+
+        (serde_json::Value::Object(map), &inner_elm[skip..])
     } else {
         panic!("Unhandled encoded value: {}", encoded_value)
     }
@@ -63,7 +87,7 @@ fn main() {
         // Uncomment this block to pass the first stage
         let encoded_value = &args[2];
         let (decoded_value, _rest) = decode_bencoded_value(encoded_value);
-        println!("{}", decoded_value.to_string());
+        println!("{}", decoded_value);
     } else {
         println!("unknown command: {}", args[1])
     }
