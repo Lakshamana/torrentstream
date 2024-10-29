@@ -33,7 +33,7 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
         // is list
         let mut inner_elm = &encoded_value[1..];
         let mut values = Vec::<serde_json::Value>::new();
-        let mut skip = 0 as usize;
+        let mut skip = 0usize;
 
         while inner_elm != "" && !inner_elm.starts_with('e') {
             let (decoded_value, rest) = decode_bencoded_value(inner_elm);
@@ -53,7 +53,7 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
         // is list
         let mut inner_elm = &encoded_value[1..];
         let mut map = serde_json::Map::new();
-        let mut skip = 0 as usize;
+        let mut skip = 0usize;
 
         while inner_elm != "" && !inner_elm.starts_with('e') {
             let (decoded_key, rest_key) = decode_bencoded_value(inner_elm);
@@ -88,6 +88,23 @@ fn main() {
         let encoded_value = &args[2];
         let (decoded_value, _rest) = decode_bencoded_value(encoded_value);
         println!("{}", decoded_value);
+    } else if command == "info" {
+        let filename = &args[2];
+        let file = std::fs::read(filename).expect("Unable to read file");
+        let parsed_file = file
+            .iter()
+            .map(|x| std::ascii::escape_default(*x).next().unwrap())
+            .collect::<Vec<u8>>();
+
+        let encoded_value = std::str::from_utf8(&parsed_file).unwrap();
+        let (decoded_value, _rest) = decode_bencoded_value(encoded_value);
+
+        let root = decoded_value.as_object().unwrap();
+        let info = root.get("info").unwrap();
+        let url = root.get("announce").unwrap().to_string();
+
+        println!("Tracker URL: {}", &url[1..url.len() - 1]);
+        println!("Length: {}", info.get("length").unwrap());
     } else {
         println!("unknown command: {}", args[1])
     }
