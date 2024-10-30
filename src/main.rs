@@ -1,13 +1,34 @@
-use serde_json;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
+use sha1::{Digest, Sha1};
 use std::env;
 
 // Available if you need it!
 // use serde_bencode
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Info {
+    length: u64,
+    name: String,
+
+    #[serde(rename = "piece length")]
+    piece_length: usize,
+    pieces: ByteBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Torrent {
+    announce: String,
+
+    #[serde(rename = "created by")]
+    created_by: String,
+    info: Info,
+}
+
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
     // If encoded_value starts with a digit, it's a number
-    if encoded_value.chars().next().unwrap().is_digit(10) {
+    if encoded_value.chars().next().unwrap().is_ascii_digit() {
         // string
         // Example: "5:hello" -> "hello"
         let colon_index = encoded_value.find(':').unwrap();
@@ -91,20 +112,17 @@ fn main() {
     } else if command == "info" {
         let filename = &args[2];
         let file = std::fs::read(filename).expect("Unable to read file");
-        let parsed_file = file
-            .iter()
-            .map(|x| std::ascii::escape_default(*x).next().unwrap())
-            .collect::<Vec<u8>>();
 
-        let encoded_value = std::str::from_utf8(&parsed_file).unwrap();
-        let (decoded_value, _rest) = decode_bencoded_value(encoded_value);
+        let torrent: Torrent = serde_bencode::from_bytes(&file).unwrap();
+        let mut enc_info = serde_bencode::ser::to_bytes(&torrent.info).unwrap();
 
-        let root = decoded_value.as_object().unwrap();
-        let info = root.get("info").unwrap();
-        let url = root.get("announce").unwrap().to_string();
+        let mut hasher = Sha1::new();
+        hasher.update(&mut enc_info);
+        let hash = hasher.finalize();
 
-        println!("Tracker URL: {}", &url[1..url.len() - 1]);
-        println!("Length: {}", info.get("length").unwrap());
+        println!("Tracker URL: {}", torrent.announce);
+        println!("Length: {}", torrent.info.length);
+        println!("Info Hash: {}", hex::encode(hash));
     } else {
         println!("unknown command: {}", args[1])
     }
