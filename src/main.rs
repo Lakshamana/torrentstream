@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
-use sha1::{Digest, Sha1};
 use std::env;
+
+use serde::{de::Visitor, Deserialize, Serialize, Serializer};
+use sha1::{Digest, Sha1};
 
 // Available if you need it!
 // use serde_bencode
@@ -13,16 +13,68 @@ struct Info {
 
     #[serde(rename = "piece length")]
     piece_length: usize,
-    pieces: ByteBuf,
+    pieces: HashList,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Torrent {
     announce: String,
 
-    #[serde(rename = "created by")]
+    #[serde(rename = "created by", default)]
     created_by: String,
     info: Info,
+}
+
+#[derive(Debug)]
+struct HashList(Vec<[u8; 20]>);
+struct HashVisitor;
+
+impl<'a> Visitor<'a> for HashVisitor {
+    type Value = HashList;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("20-ish length byte array")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if v.len() % 20 != 0 {
+            return Err(E::custom("Invalid length"));
+        }
+
+        Ok(HashList(
+            v.chunks_exact(20)
+                .map(|chunk| chunk.try_into().unwrap())
+                .collect(),
+        ))
+    }
+}
+
+impl<'a> Deserialize<'a> for HashList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'a>,
+    {
+        deserializer.deserialize_bytes(HashVisitor)
+    }
+}
+
+impl Serialize for HashList {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let slice = self.0.concat();
+        serializer.serialize_bytes(&slice)
+    }
+}
+
+fn hash(val: &mut Vec<u8>) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(val);
+    hex::encode(hasher.finalize())
 }
 
 #[allow(dead_code)]
@@ -116,13 +168,21 @@ fn main() {
         let torrent: Torrent = serde_bencode::from_bytes(&file).unwrap();
         let mut enc_info = serde_bencode::ser::to_bytes(&torrent.info).unwrap();
 
-        let mut hasher = Sha1::new();
-        hasher.update(&mut enc_info);
-        let hash = hasher.finalize();
+        let hashes_sep = torrent
+            .info
+            .pieces
+            .0
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<String>>()
+            .join("\n");
 
+        // println!("{:#?}", torrent);
         println!("Tracker URL: {}", torrent.announce);
         println!("Length: {}", torrent.info.length);
-        println!("Info Hash: {}", hex::encode(hash));
+        println!("Info Hash: {}", hash(&mut enc_info));
+        println!("Piece Length: {}", torrent.info.piece_length);
+        println!("Piece Hashes: \n{}", hashes_sep);
     } else {
         println!("unknown command: {}", args[1])
     }
