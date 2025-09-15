@@ -6,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use crate::types::{Message, Peer};
+use crate::{
+    queue::PieceRequestQueue,
+    types::{Message, Peer},
+};
 
 #[derive(Debug)]
 pub struct PeerStats {
@@ -125,7 +128,11 @@ impl PeerPool {
         }
     }
 
-    fn find_best_peer_for_piece(&self, piece_idx: usize) -> Option<usize> {
+    fn find_best_peer_for_piece(
+        &self,
+        piece_idx: usize,
+        exclude_peer_ids: &[String],
+    ) -> Option<usize> {
         self.peers.lock().map_or(None, |peers| {
             peers
                 .iter()
@@ -133,6 +140,11 @@ impl PeerPool {
                 .filter(|(_, peer)| {
                     peer.has_piece(piece_idx)
                         && peer.can_accept_download(self.max_concurrent_per_peer)
+                        && peer
+                            .peer
+                            .id
+                            .as_ref()
+                            .map_or(true, |peer_id| !exclude_peer_ids.contains(peer_id))
                 })
                 .min_by_key(|(_, peer)| peer.stats.get_load_score())
                 .map(|(peer_idx, _)| peer_idx)

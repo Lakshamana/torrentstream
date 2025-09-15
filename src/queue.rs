@@ -1,6 +1,7 @@
 use std::{
     collections::BinaryHeap,
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -16,6 +17,7 @@ pub struct PieceRequest {
     pub retry_count: usize,
     pub rarity_score: u8,
     pub last_attempt: Option<Instant>,
+    pub last_peer_id: Option<String>,
 }
 
 pub struct PieceRequestQueue {
@@ -56,16 +58,29 @@ impl PieceRequestQueue {
         }
     }
 
-    pub fn requeue_failed_piece(&self, piece_req: PieceRequest) {
+    pub fn requeue_failed_piece(&self, mut piece_req: PieceRequest) {
         if let Ok(mut queue) = self.queue.lock() {
+            piece_req.increment_retry();
             queue.push(piece_req)
         }
+    }
+
+    pub fn requeue_with_delay(&self, piece_req: PieceRequest, delay: Duration) {
+        thread::sleep(delay);
+        self.requeue_failed_piece(piece_req);
     }
 
     pub fn is_empty(&self) -> bool {
         match self.queue.lock() {
             Ok(queue) => queue.is_empty(),
             Err(_) => true,
+        }
+    }
+
+    pub fn remaining_pieces_len(&self) -> usize {
+        match self.queue.lock() {
+            Ok(queue) => queue.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
         }
     }
 }
@@ -131,10 +146,11 @@ impl PieceRequest {
             retry_count: 0,
             rarity_score,
             last_attempt: None,
+            last_peer_id: None,
         }
     }
 
-    fn increment_retry(&mut self) {
+    pub fn increment_retry(&mut self) {
         self.retry_count += 1;
     }
 
