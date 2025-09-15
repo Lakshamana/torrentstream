@@ -2,6 +2,7 @@ mod constants;
 mod pool;
 mod queue;
 mod types;
+mod utils;
 
 use anyhow::Result;
 use clap::Parser;
