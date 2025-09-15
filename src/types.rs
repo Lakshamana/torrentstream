@@ -1,10 +1,17 @@
-use crate::constants::BLOCK_SIZE;
+use crate::{
+    constants::BLOCK_SIZE,
+    utils::{calc_piece_offset, get_piece_size},
+};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use core::fmt;
+use sha1::{Digest, Sha1};
 use std::{
-    io::{Read, Write},
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    mem,
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
+    ops::Index,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -320,7 +327,12 @@ impl Peer {
         Ok(response)
     }
 
-    pub async fn download_piece(&mut self, torrent: &Torrent, index: u64) -> Result<Vec<u8>> {
+    pub async fn download_piece(
+        &mut self,
+        torrent: &Torrent,
+        piece_idx: usize,
+        output_file: Arc<Mutex<File>>,
+    ) -> Result<()> {
         let unchoke_msg = self
             .send_msg(&Message::new(MessageTypes::Interested, &[]))
             .await?;
@@ -330,11 +342,13 @@ impl Peer {
         }
 
         let piece_length = torrent.info.piece_length;
-        let p_size = piece_length.min(torrent.info.length - piece_length * index);
+        let piece_offset = calc_piece_offset(piece_idx, piece_length);
+        let p_size = get_piece_size(torrent, piece_idx);
 
-        let mut piece: Vec<u8> = vec![];
         let mut remainder = p_size as i32;
         let mut begin = 0i32;
+        let mut hasher = Sha1::new();
+
         loop {
             print!(
                 "\rLoading chunk {}%...",
@@ -342,9 +356,21 @@ impl Peer {
             );
             let b_size = BLOCK_SIZE.min(remainder);
 
-            let chunk = self.download_chunk(index as i32, begin, b_size).await?;
-            let mut c_payload = chunk.payload[8..].to_vec();
-            piece.append(&mut c_payload);
+            let chunk = self.download_chunk(piece_idx as i32, begin, b_size).await?;
+            let c_payload = &chunk.payload[8..];
+            hasher.update(c_payload);
+
+            match output_file.lock() {
+                Ok(mut file) => {
+                    file.seek(SeekFrom::Start(piece_offset + begin as u64))?;
+                    file.write_all(c_payload)?;
+                }
+                Err(poisoned) => {
+                    let mut file = poisoned.into_inner();
+                    file.seek(SeekFrom::Start(piece_offset + begin as u64))?;
+                    file.write_all(c_payload)?;
+                }
+            }
 
             remainder -= b_size;
             begin += b_size;
@@ -358,7 +384,13 @@ impl Peer {
             }
         }
 
-        Ok(piece)
+        let actual_hash = hex::encode(hasher.finalize());
+        let expected_hash = torrent.info.hash_by_index(piece_idx);
+        if actual_hash != expected_hash {
+            return Err(anyhow::format_err!("Piece hash mismatch"));
+        }
+
+        Ok(())
     }
 }
 
@@ -417,7 +449,13 @@ impl DownloadState {
         }
     }
 
-    async fn get_piece_status(&self, piece_idx: usize) -> PieceStatus {
+    fn get_piece_status(&self, piece_idx: usize) -> PieceStatus {
+        assert!(
+            piece_idx < self.total_pieces && piece_idx >= 0,
+            "Piece index out of bounds {}",
+            piece_idx
+        );
+
         match self.piece_status.lock() {
             Ok(guard) => guard[piece_idx].clone(),
             Err(poisoned) => {
@@ -427,13 +465,80 @@ impl DownloadState {
         }
     }
 
-    async fn set_piece_status(&self, piece_idx: usize, status: PieceStatus) {
+    fn set_piece_status(&self, piece_idx: usize, status: PieceStatus) {
+        assert!(
+            piece_idx < self.total_pieces && piece_idx >= 0,
+            "Piece index out of bounds {}",
+            piece_idx
+        );
+
         match self.piece_status.lock() {
-            Ok(mut guard) => guard[piece_idx] = status,
+            Ok(mut guard) => {
+                let old_status = mem::replace(&mut guard[piece_idx], status);
+
+                if let PieceStatus::InProgress { .. } = old_status {
+                    self.in_progress_pieces.fetch_sub(1, Ordering::Relaxed);
+                }
+
+                match guard[piece_idx] {
+                    PieceStatus::InProgress { .. } => {
+                        self.in_progress_pieces.fetch_add(1, Ordering::Relaxed);
+                    }
+                    PieceStatus::Failed { .. } => {
+                        self.failed_pieces.fetch_add(1, Ordering::Relaxed);
+                    }
+                    PieceStatus::Completed { .. } => {
+                        self.completed_pieces.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
             Err(poisoned) => {
                 println!("Poisoned piece status");
                 poisoned.into_inner()[piece_idx] = status;
             }
+        }
+    }
+
+    pub fn mark_piece_in_progress(&self, piece_idx: usize, peer_id: String) {
+        if let Ok(_) = self.piece_status.lock() {
+            let status = PieceStatus::InProgress {
+                peer_id,
+                started_at: Instant::now(),
+            };
+            self.set_piece_status(piece_idx, status);
+        }
+    }
+
+    pub fn mark_piece_completed(&self, piece_idx: usize) {
+        if let Ok(_) = self.piece_status.lock() {
+            let status = PieceStatus::Completed {
+                written_to_disk: true,
+            };
+            self.set_piece_status(piece_idx, status);
+            self.completed_pieces.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn mark_piece_failed(&self, piece_idx: usize, error: String) {
+        if let Ok(guard) = self.piece_status.lock() {
+            let retry_count = match guard[piece_idx] {
+                PieceStatus::Failed { retry_count, .. } => retry_count + 1,
+                _ => 1,
+            };
+
+            let status = PieceStatus::Failed {
+                retry_count,
+                last_error: error,
+            };
+            self.set_piece_status(piece_idx, status);
+            self.failed_pieces.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn reset_piece_to_pending(&self, piece_idx: usize) {
+        if let Ok(guard) = self.piece_status.lock() {
+            self.set_piece_status(piece_idx, PieceStatus::Pending);
         }
     }
 
