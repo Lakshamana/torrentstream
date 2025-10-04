@@ -2,8 +2,20 @@ use sha1::{Digest, Sha1};
 
 use crate::types::Torrent;
 
+pub fn hash(val: &mut Vec<u8>) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(val);
+    hex::encode(hasher.finalize())
+}
+
 pub fn calc_piece_offset(piece_idx: usize, piece_length: u64) -> u64 {
     piece_idx as u64 * piece_length
+}
+
+pub fn calc_total_pieces(torrent: &Torrent) -> usize {
+    let total_pieces =
+        (torrent.info.length + torrent.info.piece_length - 1) / torrent.info.piece_length;
+    total_pieces as usize
 }
 
 pub fn get_piece_size(torrent: &Torrent, piece_idx: usize) -> u64 {

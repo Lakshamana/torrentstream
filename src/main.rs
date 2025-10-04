@@ -1,4 +1,7 @@
+mod connection;
 mod constants;
+mod download;
+mod peer;
 mod pool;
 mod queue;
 mod types;
@@ -6,11 +9,12 @@ mod utils;
 
 use anyhow::Result;
 use clap::Parser;
-use sha1::{Digest, Sha1};
 use std::fs::File;
+use std::io::Write;
 use std::result::Result::Ok;
-use std::{char, io::Write};
-use types::{Args, Command, Message, Peer, Torrent, TorrentServerRequest, TorrentServerResponse};
+use types::{Args, Command, Message, Torrent, TorrentServerRequest, TorrentServerResponse};
+
+use crate::{peer::Peer, utils::hash};
 
 async fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
     let hash = hash(&mut serde_bencode::ser::to_bytes(&torrent.info).unwrap());
@@ -42,12 +46,6 @@ async fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
             anyhow::bail!("Failed to get peers");
         }
     }
-}
-
-fn hash(val: &mut Vec<u8>) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(val);
-    hex::encode(hasher.finalize())
 }
 
 fn encode_url(val: &str) -> String {

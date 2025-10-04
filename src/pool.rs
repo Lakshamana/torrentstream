@@ -1,115 +1,25 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
+    time::Duration,
 };
 
-use crate::{
-    queue::PieceRequestQueue,
-    types::{Message, Peer},
-};
+use anyhow::Result;
+use tokio::time::timeout;
 
-#[derive(Debug)]
-pub struct PeerStats {
-    active_downloads: AtomicUsize,
-    completed_pieces: AtomicUsize,
-    failed_pieces: AtomicUsize,
-    total_download_time_ms: AtomicU64,
-    last_activity: Mutex<Instant>,
-    connection_failures: AtomicUsize,
-}
+use crate::peer::Peer;
 
-pub struct PeerWithStats {
-    pub peer: Peer,
-    pub stats: PeerStats,
-    pub bitfield: Option<Message>,
-    pub is_connected: AtomicBool,
-}
-
-struct PeerPool {
-    peers: Arc<Mutex<Vec<PeerWithStats>>>,
+pub struct PeerPool {
+    pub peers: Arc<Mutex<Vec<Peer>>>,
     max_concurrent_per_peer: usize,
     total_active_downloads: Arc<AtomicUsize>,
 }
-
-impl PeerStats {
-    fn new() -> Self {
-        Self {
-            active_downloads: AtomicUsize::new(0),
-            completed_pieces: AtomicUsize::new(0),
-            failed_pieces: AtomicUsize::new(0),
-            total_download_time_ms: AtomicU64::new(0),
-            last_activity: Mutex::new(Instant::now()),
-            connection_failures: AtomicUsize::new(0),
-        }
-    }
-
-    fn increment_active(&self) {
-        self.active_downloads.fetch_add(1, Ordering::Release);
-    }
-
-    fn decrement_active(&self) {
-        self.active_downloads.fetch_sub(1, Ordering::Release);
-    }
-
-    fn record_completion(&self, download_time_ms: u64) {
-        self.completed_pieces.fetch_add(1, Ordering::Release);
-        self.total_download_time_ms
-            .fetch_add(download_time_ms, Ordering::Release);
-    }
-
-    fn record_failure(&self) {
-        self.failed_pieces.fetch_add(1, Ordering::Release);
-    }
-
-    fn get_average_speed(&self) -> f64 {
-        let total_time = self.total_download_time_ms.load(Ordering::Acquire);
-        let total_pieces = self.completed_pieces.load(Ordering::Acquire);
-        if total_time == 0 || total_pieces == 0 {
-            0.0
-        } else {
-            (total_pieces as f64 * 1000.0) / (total_time as f64)
-        }
-    }
-
-    fn get_load_score(&self) -> usize {
-        self.active_downloads.load(Ordering::Acquire)
-    }
-}
-
-impl PeerWithStats {
-    fn new(peer: Peer) -> Self {
-        Self {
-            peer,
-            stats: PeerStats::new(),
-            bitfield: None,
-            is_connected: AtomicBool::new(false),
-        }
-    }
-
-    pub fn has_piece(&self, piece_idx: usize) -> bool {
-        let piece_idx = piece_idx / 8;
-        let bit_idx = piece_idx % 8;
-
-        self.bitfield
-            .as_ref()
-            .and_then(|bitfield| bitfield.payload.get(piece_idx))
-            .map_or(false, |&byte| (byte >> (7 - bit_idx)) & 1 == 1)
-    }
-
-    fn can_accept_download(&self, max_concurrency: usize) -> bool {
-        self.is_connected.load(Ordering::Acquire) && self.stats.get_load_score() < max_concurrency
-    }
-}
-
 impl PeerPool {
-    fn new(peers: Vec<Peer>, max_concurrent_per_peer: usize) -> Self {
+    pub fn new(peers: Vec<Peer>, max_concurrent_per_peer: usize) -> Self {
         Self {
-            peers: Arc::new(Mutex::new(
-                peers.into_iter().map(PeerWithStats::new).collect(),
-            )),
+            peers: Arc::new(Mutex::new(peers)),
             max_concurrent_per_peer,
             total_active_downloads: Arc::new(AtomicUsize::new(0)),
         }
@@ -128,10 +38,16 @@ impl PeerPool {
         }
     }
 
-    fn find_best_peer_for_piece(
+    pub fn get_peer_by_index(&self, peer_idx: usize) -> Option<Peer> {
+        self.peers
+            .lock()
+            .map_or(None, |peers| peers.get(peer_idx).cloned())
+    }
+
+    pub fn find_best_peer_for_piece(
         &self,
         piece_idx: usize,
-        exclude_peer_ids: &[String],
+        exclude_peer_ids: &[&String],
     ) -> Option<usize> {
         self.peers.lock().map_or(None, |peers| {
             peers
@@ -141,10 +57,9 @@ impl PeerPool {
                     peer.has_piece(piece_idx)
                         && peer.can_accept_download(self.max_concurrent_per_peer)
                         && peer
-                            .peer
                             .id
                             .as_ref()
-                            .map_or(true, |peer_id| !exclude_peer_ids.contains(peer_id))
+                            .map_or(true, |peer_id| !exclude_peer_ids.contains(&peer_id))
                 })
                 .min_by_key(|(_, peer)| peer.stats.get_load_score())
                 .map(|(peer_idx, _)| peer_idx)
@@ -157,5 +72,33 @@ impl PeerPool {
             self.peers.lock().unwrap().len(),
             self.max_concurrent_per_peer,
         )
+    }
+
+    pub async fn handshake_all(&self, hash_info: &[u8]) -> Result<usize> {
+        let n_connected = if let Ok(mut peers) = self.peers.lock() {
+            let tasks: Vec<_> = peers
+                .iter_mut()
+                .map(|p| {
+                    let hash_info = hash_info.to_vec();
+                    timeout(Duration::from_secs(5), async move {
+                        p.handshake(&hash_info).await
+                    })
+                })
+                .collect();
+
+            futures::future::join_all(tasks)
+                .await
+                .into_iter()
+                .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
+                .count()
+        } else {
+            0
+        };
+
+        Ok(n_connected)
+    }
+
+    pub fn len(&self) -> usize {
+        self.peers.lock().unwrap().len()
     }
 }

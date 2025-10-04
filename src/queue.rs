@@ -1,20 +1,19 @@
 use std::{
     collections::BinaryHeap,
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, Instant},
 };
 
 use crate::{
     constants::{DEFAULT_RANDOM_RATIO, DEFAULT_RAREST_FIRST_RATIO, DEFAULT_SEQUENTIAL_RATIO},
-    pool::PeerWithStats,
+    peer::Peer,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PieceRequest {
     pub piece_idx: usize,
     pub priority: u8,
-    pub retry_count: usize,
+    pub retry_count: u32,
     pub rarity_score: u8,
     pub last_attempt: Option<Instant>,
     pub last_peer_id: Option<String>,
@@ -26,11 +25,7 @@ pub struct PieceRequestQueue {
 }
 
 impl PieceRequestQueue {
-    pub fn new(
-        strategy: PiecePriorityStrategy,
-        total_pieces: usize,
-        peers: &[PeerWithStats],
-    ) -> Self {
+    pub fn new(strategy: PiecePriorityStrategy, total_pieces: usize, peers: &[Peer]) -> Self {
         let requests = (0..total_pieces).map(|piece_idx| {
             let frequency = peers
                 .iter()
@@ -58,15 +53,20 @@ impl PieceRequestQueue {
         }
     }
 
-    pub fn requeue_failed_piece(&self, mut piece_req: PieceRequest) {
+    pub fn requeue_failed_piece(&self, piece_req: Arc<PieceRequest>) {
         if let Ok(mut queue) = self.queue.lock() {
-            piece_req.increment_retry();
-            queue.push(piece_req)
+            let mut resolved_req = match Arc::try_unwrap(piece_req) {
+                Ok(req) => req,
+                Err(arc_req) => (*arc_req).clone(),
+            };
+
+            resolved_req.increment_retry();
+            queue.push(resolved_req);
         }
     }
 
-    pub fn requeue_with_delay(&self, piece_req: PieceRequest, delay: Duration) {
-        thread::sleep(delay);
+    pub async fn requeue_with_delay(&self, piece_req: Arc<PieceRequest>, delay: Duration) {
+        tokio::time::sleep(delay);
         self.requeue_failed_piece(piece_req);
     }
 
@@ -154,7 +154,7 @@ impl PieceRequest {
         self.retry_count += 1;
     }
 
-    fn should_retry(&self, max_retries: usize, min_retry_delay: Duration) -> bool {
+    pub fn should_retry(&self, max_retries: u32, min_retry_delay: Duration) -> bool {
         self.retry_count < max_retries
             && self.last_attempt.map_or(true, |last_attempt| {
                 last_attempt.elapsed() >= min_retry_delay

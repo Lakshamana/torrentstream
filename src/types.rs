@@ -1,17 +1,8 @@
-use crate::{
-    constants::BLOCK_SIZE,
-    utils::{calc_piece_offset, get_piece_size},
-};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use core::fmt;
-use sha1::{Digest, Sha1};
 use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
     mem,
-    net::{Ipv4Addr, SocketAddrV4, TcpStream},
-    ops::Index,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -52,6 +43,7 @@ pub enum MessageTypes {
     Cancel = 8,
 }
 
+#[derive(Clone)]
 pub struct Message {
     pub prefix: i32,
     pub id: MessageTypes,
@@ -108,7 +100,7 @@ impl Message {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Info {
     pub length: u64,
     pub name: String,
@@ -132,7 +124,7 @@ impl Info {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Torrent {
     pub announce: String,
 
@@ -141,7 +133,7 @@ pub struct Torrent {
     pub info: Info,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HashList(pub Vec<[u8; 20]>);
 struct HashVisitor;
 
@@ -221,191 +213,13 @@ pub struct TorrentServerResponse {
     pub peers: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub struct Peer {
-    pub address: SocketAddrV4,
-    pub connection: Option<TcpStream>,
-    pub id: Option<String>,
-}
-
-impl Peer {
-    pub fn from_socket(address: SocketAddrV4) -> Self {
-        Self {
-            address,
-            connection: None,
-            id: None,
-        }
-    }
-
-    pub fn new(bytes: &[u8]) -> Self {
-        let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-        let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-
-        Peer {
-            address: SocketAddrV4::new(ip, port),
-            id: None,
-            connection: None,
-        }
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Vec<Peer> {
-        bytes.chunks_exact(6).map(Peer::new).collect()
-    }
-
-    async fn r_peer_msg(&mut self) -> Result<Option<Message>> {
-        let mut m_size = [0u8; 4];
-        let mut m_type = [0u8; 1];
-
-        if let Some(connection) = self.connection.as_mut() {
-            connection.read_exact(&mut m_size)?;
-            connection.read_exact(&mut m_type)?;
-
-            let length = u32::from_be_bytes(m_size);
-            let id = u8::from_be_bytes(m_type);
-
-            let id_result = MessageTypes::try_from(id);
-            if id_result.is_err() {
-                return Ok(None);
-            }
-
-            let mut payload_buf = vec![0u8; length as usize - 1];
-            connection.read_exact(&mut payload_buf)?;
-
-            return Ok(Some(Message::new(id_result.unwrap(), &payload_buf)));
-        }
-
-        Err(anyhow::format_err!("Connection not set"))
-    }
-
-    pub async fn handshake(&mut self, hash_info: &[u8]) -> Result<Option<Message>> {
-        let mut stream = TcpStream::connect(self.address)?;
-        let protocol_str = "BitTorrent protocol";
-        let peer_id = "lakshamana_torclient".to_string();
-
-        let mut rbuf = [0u8; 68];
-        let wbuf = [
-            &[19u8],
-            protocol_str.as_bytes(),
-            &[0u8; 8],
-            hash_info,
-            peer_id.as_bytes(),
-        ]
-        .concat();
-
-        stream.write_all(&wbuf)?;
-        stream.read_exact(&mut rbuf)?;
-
-        self.connection = Some(stream);
-        self.id = Some(hex::encode(&rbuf[48..]));
-        println!(">> Handshaking peer {}", self);
-
-        self.r_peer_msg().await
-    }
-
-    pub async fn send_msg(&mut self, message: &Message) -> Result<Message> {
-        if let Some(connection) = self.connection.as_mut() {
-            connection.write_all(&message.to_bytes()).unwrap();
-            let resp_msg = self.r_peer_msg().await?;
-
-            return Ok(resp_msg.expect("Response message not found"));
-        }
-
-        Err(anyhow::format_err!("Connection not set"))
-    }
-
-    async fn download_chunk(&mut self, index: i32, begin: i32, length: i32) -> Result<Message> {
-        let payload = [
-            index.to_be_bytes(),
-            begin.to_be_bytes(),
-            length.to_be_bytes(),
-        ]
-        .concat();
-
-        let request = Message::new(MessageTypes::Request, &payload);
-        let response = self.send_msg(&request).await?;
-
-        Ok(response)
-    }
-
-    pub async fn download_piece(
-        &mut self,
-        torrent: &Torrent,
-        piece_idx: usize,
-        output_file: Arc<Mutex<File>>,
-    ) -> Result<()> {
-        let unchoke_msg = self
-            .send_msg(&Message::new(MessageTypes::Interested, &[]))
-            .await?;
-
-        if unchoke_msg.id != MessageTypes::Unchoke {
-            panic!("Expected unchoke message");
-        }
-
-        let piece_length = torrent.info.piece_length;
-        let piece_offset = calc_piece_offset(piece_idx, piece_length);
-        let p_size = get_piece_size(torrent, piece_idx);
-
-        let mut remainder = p_size as i32;
-        let mut begin = 0i32;
-        let mut hasher = Sha1::new();
-
-        loop {
-            print!(
-                "\rLoading chunk {}%...",
-                ((p_size as i32 - remainder) * 100 / p_size as i32)
-            );
-            let b_size = BLOCK_SIZE.min(remainder);
-
-            let chunk = self.download_chunk(piece_idx as i32, begin, b_size).await?;
-            let c_payload = &chunk.payload[8..];
-            hasher.update(c_payload);
-
-            match output_file.lock() {
-                Ok(mut file) => {
-                    file.seek(SeekFrom::Start(piece_offset + begin as u64))?;
-                    file.write_all(c_payload)?;
-                }
-                Err(poisoned) => {
-                    let mut file = poisoned.into_inner();
-                    file.seek(SeekFrom::Start(piece_offset + begin as u64))?;
-                    file.write_all(c_payload)?;
-                }
-            }
-
-            remainder -= b_size;
-            begin += b_size;
-
-            if remainder == 0 {
-                print!(
-                    "\rLoading chunk {}%...",
-                    ((p_size as i32 - remainder) * 100 / p_size as i32)
-                );
-                break;
-            }
-        }
-
-        let actual_hash = hex::encode(hasher.finalize());
-        let expected_hash = torrent.info.hash_by_index(piece_idx);
-        if actual_hash != expected_hash {
-            return Err(anyhow::format_err!("Piece hash mismatch"));
-        }
-
-        Ok(())
-    }
-}
-
-impl fmt::Display for Peer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(format!("Peer({}:{})", self.address.ip(), self.address.port()).as_str())
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum PieceStatus {
     Pending,
     InProgress {
         peer_id: String,
         started_at: Instant,
+        worker_id: String,
     },
     Completed {
         written_to_disk: bool,
@@ -418,12 +232,12 @@ pub enum PieceStatus {
 
 #[derive(Debug)]
 pub struct DownloadProgress {
-    completed_pieces: usize,
-    in_progress_pieces: usize,
-    failed_pieces: usize,
-    total_pieces: usize,
-    bytes_downloaded: u64,
-    total_bytes: u64,
+    pub completed_pieces: usize,
+    pub in_progress_pieces: usize,
+    pub failed_pieces: usize,
+    pub total_pieces: usize,
+    pub bytes_downloaded: u64,
+    pub total_bytes: u64,
 }
 
 pub struct DownloadState {
@@ -500,11 +314,12 @@ impl DownloadState {
         }
     }
 
-    pub fn mark_piece_in_progress(&self, piece_idx: usize, peer_id: String) {
+    pub fn mark_piece_in_progress(&self, piece_idx: usize, peer_id: &str, worker_id: String) {
         if let Ok(_) = self.piece_status.lock() {
             let status = PieceStatus::InProgress {
-                peer_id,
+                peer_id: peer_id.to_string(),
                 started_at: Instant::now(),
+                worker_id,
             };
             self.set_piece_status(piece_idx, status);
         }
@@ -537,7 +352,7 @@ impl DownloadState {
     }
 
     pub fn reset_piece_to_pending(&self, piece_idx: usize) {
-        if let Ok(guard) = self.piece_status.lock() {
+        if let Ok(_) = self.piece_status.lock() {
             self.set_piece_status(piece_idx, PieceStatus::Pending);
         }
     }
