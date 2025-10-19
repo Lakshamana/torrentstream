@@ -121,29 +121,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4682ae6287fcf752ecaabbfcc7b6f9b72aa33933dc23a554d853aea8eea8635"
 
 [[package]]
-name = "bittorrent-starter-rust"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "futures",
- "hex",
- "rand",
- "regex",
- "reqwest",
- "serde",
- "serde_bencode",
- "serde_bytes",
- "serde_json",
- "serde_urlencoded",
- "sha1",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1265,6 +1242,29 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "torrentstream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "futures",
+ "hex",
+ "rand",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_bencode",
+ "serde_bytes",
+ "serde_json",
+ "serde_urlencoded",
+ "sha1",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
