@@ -12,7 +12,7 @@ use clap::Parser;
 use std::fs::File;
 use std::io::Write;
 use std::result::Result::Ok;
-use types::{Args, Command, Message, Torrent, TorrentServerRequest, TorrentServerResponse};
+use types::{Args, Command, Torrent, TorrentServerRequest, TorrentServerResponse};
 
 use crate::{peer::Peer, utils::hash};
 
@@ -62,21 +62,6 @@ fn encode_url(val: &str) -> String {
         .collect()
 }
 
-fn peer_has_piece(bitfield: Message, p_index: usize) -> bool {
-    let bitset = bitfield
-        .payload
-        .iter()
-        .fold(String::from(""), |acc, &v| format!("{acc}{:b}", v));
-
-    return bitset.chars().nth(p_index) == Some('1');
-}
-
-fn print_progress(piece_idx: usize, num_pieces: usize) {
-    let progress = (piece_idx as f64 / num_pieces as f64) * 100.0;
-    print!("\rDonwloading {:.2}%", progress);
-    std::io::stdout().flush().unwrap();
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -85,39 +70,19 @@ async fn main() -> Result<()> {
         Command::Download {
             torrent_path,
             output,
+            workers,
         } => {
             let file = std::fs::read(torrent_path).expect("Unable to read torrent file");
 
             let torrent: Torrent = serde_bencode::from_bytes(&file).unwrap();
 
-            let mut peers = get_peers(&torrent).await?;
-            let mut enc_info = serde_bencode::ser::to_bytes(&torrent.info).unwrap();
-            let hash_info = hex::decode(hash(&mut enc_info))?;
+            let peers = get_peers(&torrent).await?;
 
             let num_pieces = (torrent.info.length / torrent.info.piece_length) as usize;
-            let mut pieces: Vec<Vec<u8>> = Vec::new();
+            let pieces: Vec<Vec<u8>> = Vec::new();
 
             println!("Downloading file...");
-            for piece_idx in 0..num_pieces {
-                for peer in &mut peers {
-                    print_progress(piece_idx, num_pieces);
-
-                    if let Ok(Some(bitfield)) = peer.handshake(&hash_info).await {
-                        if peer_has_piece(bitfield, piece_idx) {
-                            let mut piece = peer.download_piece(&torrent, piece_idx as u64).await?;
-                            let hash_cmp = torrent.info.hash_by_index(piece_idx);
-
-                            let hash = hash(&mut piece);
-                            if hash != hash_cmp {
-                                continue;
-                            }
-
-                            pieces.push(piece);
-                            break;
-                        }
-                    }
-                }
-            }
+            download::download(torrent, peers, &output, workers).await?;
 
             if pieces.is_empty() || pieces.len() != num_pieces as usize {
                 anyhow::bail!("Failed to download all pieces");

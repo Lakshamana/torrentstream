@@ -13,6 +13,8 @@ use std::{
 
 use serde::{de::Visitor, Deserialize, Serialize, Serializer};
 
+use crate::constants;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -24,9 +26,11 @@ pub struct Args {
 #[clap(rename_all = "snake_case")]
 pub enum Command {
     Download {
-        #[arg(short, long)]
+        #[arg(short = 'o', long)]
         output: PathBuf,
         torrent_path: PathBuf,
+        #[arg(short = 'w', long, default_value_t = constants::MAX_CONCURRENCY)]
+        workers: usize,
     },
 }
 
@@ -265,7 +269,7 @@ impl DownloadState {
 
     fn get_piece_status(&self, piece_idx: usize) -> PieceStatus {
         assert!(
-            piece_idx < self.total_pieces && piece_idx >= 0,
+            piece_idx < self.total_pieces,
             "Piece index out of bounds {}",
             piece_idx
         );
@@ -281,7 +285,7 @@ impl DownloadState {
 
     fn set_piece_status(&self, piece_idx: usize, status: PieceStatus) {
         assert!(
-            piece_idx < self.total_pieces && piece_idx >= 0,
+            piece_idx < self.total_pieces,
             "Piece index out of bounds {}",
             piece_idx
         );

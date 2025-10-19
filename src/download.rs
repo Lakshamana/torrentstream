@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::{
     connection::validate_peers_connection,
-    constants::{MAX_CONCURRENCY, MAX_RETRIES},
+    constants::MAX_RETRIES,
     peer::Peer,
     pool::PeerPool,
     queue::{PiecePriorityStrategy, PieceRequestQueue},
@@ -152,14 +152,14 @@ async fn report_progress(
     Ok(())
 }
 
-async fn download(
+pub async fn download(
     torrent: Torrent,
     peers: Vec<Peer>,
-    output_path: PathBuf,
+    output_path: &PathBuf,
     max_concurrent_workers: usize,
 ) -> Result<()> {
     let output_file = {
-        let file = File::create(&output_path)?;
+        let file = File::create(output_path)?;
         file.set_len(torrent.info.length)?;
         Arc::new(Mutex::new(file))
     };
@@ -192,8 +192,7 @@ async fn download(
 
     assert!(stats.connected > 0, "No peers connected");
 
-    let workers: Vec<_> = (0..MAX_CONCURRENCY)
-        .into_iter()
+    let mut workers: Vec<_> = (0..max_concurrent_workers)
         .map(|worker_id| {
             let pool_clone = Arc::clone(&pool);
             let download_state_clone = Arc::clone(&download_state);
@@ -211,9 +210,13 @@ async fn download(
         })
         .collect();
 
-    futures::future::join_all(workers).await;
+    let progress_reporter = tokio::spawn(report_progress(
+        Arc::clone(&download_state),
+        Duration::from_secs(1),
+    ));
 
-    // TODO: Spawn progress reporter here
+    workers.push(progress_reporter);
+    futures::future::join_all(workers).await;
 
     Ok(())
 }

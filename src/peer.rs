@@ -178,10 +178,6 @@ impl Peer {
         let mut hasher = Sha1::new();
 
         loop {
-            print!(
-                "\rLoading chunk {}%...",
-                ((p_size as i32 - remainder) * 100 / p_size as i32)
-            );
             let b_size = BLOCK_SIZE.min(remainder);
 
             let chunk = self.download_chunk(piece_idx as i32, begin, b_size).await?;
@@ -222,7 +218,7 @@ impl Peer {
     }
 
     pub async fn handshake(&mut self, hash_info: &[u8]) -> Result<()> {
-        match self._handshake(&hash_info).await {
+        match self._handshake(hash_info).await {
             Ok(Some(msg)) => {
                 self.bitfield = Some(msg);
                 self.is_connected.store(true, Ordering::Release);
