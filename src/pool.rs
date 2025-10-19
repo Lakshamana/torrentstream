@@ -50,7 +50,7 @@ impl PeerPool {
         exclude_peer_ids: &[&String],
     ) -> Option<usize> {
         self.peers.lock().map_or(None, |peers| {
-            peers
+            let p = peers
                 .iter()
                 .enumerate()
                 .filter(|(_, peer)| {
@@ -61,8 +61,15 @@ impl PeerPool {
                             .as_ref()
                             .map_or(true, |peer_id| !exclude_peer_ids.contains(&peer_id))
                 })
-                .min_by_key(|(_, peer)| peer.stats.get_load_score())
-                .map(|(peer_idx, _)| peer_idx)
+                .min_by_key(|(_, peer)| peer.stats.get_load_score());
+
+            if p.is_some() {
+                let (idx, p) = p.unwrap();
+                p.stats.increment_active();
+                return Some(idx);
+            }
+
+            None
         })
     }
 
@@ -75,7 +82,12 @@ impl PeerPool {
     }
 
     pub async fn handshake_all(&self, hash_info: &[u8]) -> Result<usize> {
-        let n_connected = if let Ok(mut peers) = self.peers.lock() {
+        let mut peers = match self.peers.lock() {
+            Ok(peers) => peers,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let n_connected = if !peers.is_empty() {
             let tasks: Vec<_> = peers
                 .iter_mut()
                 .map(|p| {

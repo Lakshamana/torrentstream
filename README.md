@@ -38,7 +38,7 @@ TorrentStream aims to be a modern, efficient BitTorrent client that leverages Ru
 ## 🚀 Installation
 
 ### Prerequisites
-- Rust 1.77+ (specified in `codecrafters.yml`)
+- Rust 1.77+
 - Git
 
 ### From Source
@@ -50,7 +50,7 @@ cd torrentstream
 # Build the project
 cargo build --release
 
-# The binary will be available at target/release/bittorrent-starter-rust
+# The binary will be available at target/release/torrentstream
 ```
 
 ### Development Build
@@ -67,7 +67,7 @@ cargo run -- --help
 ### Basic Download
 ```bash
 # Download a torrent file to specified output directory
-./target/release/bittorrent-starter-rust download -o /path/to/output file.torrent
+./target/release/torrentstream download -o /path/to/output file.torrent
 ```
 
 ### Command Line Options

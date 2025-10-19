@@ -276,10 +276,7 @@ impl DownloadState {
 
         match self.piece_status.lock() {
             Ok(guard) => guard[piece_idx].clone(),
-            Err(poisoned) => {
-                println!("Poisoned piece status");
-                poisoned.into_inner()[piece_idx].clone()
-            }
+            Err(poisoned) => poisoned.into_inner()[piece_idx].clone(),
         }
     }
 
@@ -312,53 +309,42 @@ impl DownloadState {
                 }
             }
             Err(poisoned) => {
-                println!("Poisoned piece status");
                 poisoned.into_inner()[piece_idx] = status;
             }
         }
     }
 
     pub fn mark_piece_in_progress(&self, piece_idx: usize, peer_id: &str, worker_id: String) {
-        if let Ok(_) = self.piece_status.lock() {
-            let status = PieceStatus::InProgress {
-                peer_id: peer_id.to_string(),
-                started_at: Instant::now(),
-                worker_id,
-            };
-            self.set_piece_status(piece_idx, status);
-        }
+        let status = PieceStatus::InProgress {
+            peer_id: peer_id.to_string(),
+            started_at: Instant::now(),
+            worker_id,
+        };
+        self.set_piece_status(piece_idx, status);
     }
 
     pub fn mark_piece_completed(&self, piece_idx: usize) {
-        if let Ok(_) = self.piece_status.lock() {
-            let status = PieceStatus::Completed {
-                written_to_disk: true,
-            };
-            self.set_piece_status(piece_idx, status);
-            self.completed_pieces.fetch_add(1, Ordering::Relaxed);
-        }
+        let status = PieceStatus::Completed {
+            written_to_disk: true,
+        };
+        self.set_piece_status(piece_idx, status);
     }
 
     pub fn mark_piece_failed(&self, piece_idx: usize, error: String) {
-        if let Ok(guard) = self.piece_status.lock() {
-            let retry_count = match guard[piece_idx] {
-                PieceStatus::Failed { retry_count, .. } => retry_count + 1,
-                _ => 1,
-            };
+        let retry_count = match self.get_piece_status(piece_idx) {
+            PieceStatus::Failed { retry_count, .. } => retry_count + 1,
+            _ => 1,
+        };
 
-            let status = PieceStatus::Failed {
-                retry_count,
-                last_error: error,
-            };
-            self.set_piece_status(piece_idx, status);
-            self.failed_pieces.fetch_add(1, Ordering::Relaxed);
-        }
+        let status = PieceStatus::Failed {
+            retry_count,
+            last_error: error,
+        };
+        self.set_piece_status(piece_idx, status);
     }
 
     pub fn reset_piece_to_pending(&self, piece_idx: usize) {
-        if let Ok(_) = self.piece_status.lock() {
-            self.set_piece_status(piece_idx, PieceStatus::Pending);
-        }
+        self.set_piece_status(piece_idx, PieceStatus::Pending);
     }
 
     pub fn get_progress_snapshot(&self) -> DownloadProgress {

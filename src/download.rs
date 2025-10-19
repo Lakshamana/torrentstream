@@ -1,5 +1,7 @@
 use std::{
+    cmp,
     fs::File,
+    io::Write,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -9,7 +11,7 @@ use anyhow::Result;
 
 use crate::{
     connection::validate_peers_connection,
-    constants::MAX_RETRIES,
+    constants::{self, MAX_RETRIES},
     peer::Peer,
     pool::PeerPool,
     queue::{PiecePriorityStrategy, PieceRequestQueue},
@@ -26,6 +28,7 @@ fn is_network_related_error(e: &anyhow::Error) -> bool {
         || e_str.contains("Broken pipe")
         || e_str.contains("No route to host")
         || e_str.contains("Network is unreachable")
+        || e_str.contains("Peer did not unchoke")
 }
 
 async fn download_worker(
@@ -85,17 +88,11 @@ async fn download_worker(
             Err(e) => {
                 let piece_idx = piece_req.piece_idx;
 
-                // Distinguish between network errors and other errors
                 let is_network_error = is_network_related_error(&e);
 
                 if is_network_error {
-                    // Mark peer as disconnected and increment failure counter
                     if let Some(peer_with_stats) = pool.get_peer_by_index(peer_idx) {
                         peer_with_stats.mark_disconnected();
-                        println!(
-                            "⚠️ Peer {} disconnected during piece {} download",
-                            peer_id, piece_idx
-                        );
                     }
                 }
 
@@ -108,8 +105,6 @@ async fn download_worker(
                             .requeue_with_delay(piece_req_arc, Duration::from_secs(2))
                             .await
                     });
-                } else {
-                    eprintln!("⚠️ Piece {} failed permanently: {}", piece_idx, e);
                 }
             }
         }
@@ -118,10 +113,43 @@ async fn download_worker(
     Ok(())
 }
 
+fn create_visual_progress_bar(
+    completed: usize,
+    in_progress: usize,
+    failed: usize,
+    total: usize,
+    bar_width: usize,
+) -> String {
+    if total == 0 {
+        return format!("[{}]", " ".repeat(bar_width));
+    }
+
+    let completed_width = (completed * bar_width) / total;
+    let in_progress_width = (in_progress * bar_width) / total;
+    let failed_width = (failed * bar_width) / total;
+    let pending_width = bar_width - completed_width - in_progress_width - failed_width;
+
+    let mut bar = String::with_capacity(bar_width + 2);
+    bar.push('[');
+
+    bar.push_str(&"█".repeat(completed_width));
+
+    bar.push_str(&"▒".repeat(in_progress_width));
+
+    bar.push_str(&"░".repeat(failed_width));
+
+    bar.push_str(&" ".repeat(pending_width));
+
+    bar.push(']');
+    bar
+}
+
 async fn report_progress(
     download_state: Arc<DownloadState>,
     update_interval: Duration,
 ) -> Result<()> {
+    const BAR_WIDTH: usize = 50;
+
     loop {
         let progress = download_state.get_progress_snapshot();
 
@@ -130,19 +158,28 @@ async fn report_progress(
         let bytes_percent =
             (progress.bytes_downloaded as f64 / progress.total_bytes as f64) * 100.0;
 
+        let visual_bar = create_visual_progress_bar(
+            progress.completed_pieces,
+            progress.in_progress_pieces,
+            progress.failed_pieces,
+            progress.total_pieces,
+            BAR_WIDTH,
+        );
+
         print!(
-            "\rDownloaded: {:.1}% ({}/{} pieces, {:.1}% of {} bytes) | In progress: {}, Failed: {}",
+            "\r{} {:.1}% ({}/{} pieces) | In progress: {} | Failed: {} | {:.1}% of {} bytes",
+            visual_bar,
             completed_percent,
             progress.completed_pieces,
             progress.total_pieces,
-            bytes_percent,
-            progress.total_bytes,
             progress.in_progress_pieces,
             progress.failed_pieces,
+            bytes_percent,
+            progress.total_bytes,
         );
+        std::io::stdout().flush()?;
 
         if download_state.is_complete() {
-            println!("\rDownload complete!");
             break;
         }
 
@@ -166,7 +203,7 @@ pub async fn download(
 
     let total_pieces = calc_total_pieces(&torrent);
     let download_state = Arc::new(DownloadState::new(total_pieces, torrent.info.length));
-    let pool = Arc::new(PeerPool::new(peers, max_concurrent_workers));
+    let pool = Arc::new(PeerPool::new(peers, 1));
 
     let strategy = PiecePriorityStrategy::Hybrid {
         rarest_first_ratio: 0.7,
@@ -184,15 +221,15 @@ pub async fn download(
 
     // Validate peer connections before starting workers
     let stats = validate_peers_connection(Arc::clone(&pool), &hash_info).await?;
-    println!(
-        "Connected to {}/{} peers",
-        stats.connected,
-        stats.connected + stats.failed
-    );
 
     assert!(stats.connected > 0, "No peers connected");
 
-    let mut workers: Vec<_> = (0..max_concurrent_workers)
+    let worker_num = cmp::min(
+        max_concurrent_workers,
+        cmp::max(stats.connected, constants::MAX_CONCURRENCY / 2),
+    );
+
+    let workers: Vec<_> = (0..worker_num)
         .map(|worker_id| {
             let pool_clone = Arc::clone(&pool);
             let download_state_clone = Arc::clone(&download_state);
@@ -210,12 +247,11 @@ pub async fn download(
         })
         .collect();
 
-    let progress_reporter = tokio::spawn(report_progress(
+    tokio::spawn(report_progress(
         Arc::clone(&download_state),
         Duration::from_secs(1),
     ));
 
-    workers.push(progress_reporter);
     futures::future::join_all(workers).await;
 
     Ok(())

@@ -41,8 +41,6 @@ async fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
             Ok(peers)
         }
         _ => {
-            println!("Error getting peers: {:?}", response.status());
-
             anyhow::bail!("Failed to get peers");
         }
     }
@@ -73,23 +71,10 @@ async fn main() -> Result<()> {
             workers,
         } => {
             let file = std::fs::read(torrent_path).expect("Unable to read torrent file");
-
             let torrent: Torrent = serde_bencode::from_bytes(&file).unwrap();
-
             let peers = get_peers(&torrent).await?;
 
-            let num_pieces = (torrent.info.length / torrent.info.piece_length) as usize;
-            let pieces: Vec<Vec<u8>> = Vec::new();
-
-            println!("Downloading file...");
             download::download(torrent, peers, &output, workers).await?;
-
-            if pieces.is_empty() || pieces.len() != num_pieces as usize {
-                anyhow::bail!("Failed to download all pieces");
-            }
-
-            let mut file = File::create(output)?;
-            file.write_all(&pieces.concat())?;
         }
     };
 

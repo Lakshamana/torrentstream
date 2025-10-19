@@ -97,6 +97,10 @@ impl Peer {
                 return Ok(None);
             }
 
+            if length == 0 {
+                return Ok(None);
+            }
+
             let mut payload_buf = vec![0u8; length as usize - 1];
             connection.read_exact(&mut payload_buf)?;
 
@@ -132,10 +136,18 @@ impl Peer {
 
     pub async fn send_msg(&mut self, message: &Message) -> Result<Message> {
         if let Some(connection) = self.connection.as_mut() {
-            connection.write_all(&message.to_bytes()).unwrap();
-            let resp_msg = self.r_peer_msg().await?;
+            if let Err(e) = connection.write_all(&message.to_bytes()) {
+                self.mark_disconnected();
+                return Err(anyhow::anyhow!("Failed to send message: {}", e));
+            }
 
-            return Ok(resp_msg.expect("Response message not found"));
+            return match self.r_peer_msg().await {
+                Ok(m) => Ok(m.unwrap()),
+                Err(e) => {
+                    self.mark_disconnected();
+                    Err(e)
+                }
+            };
         }
 
         Err(anyhow::format_err!("Connection not set"))
@@ -166,7 +178,7 @@ impl Peer {
             .await?;
 
         if unchoke_msg.id != MessageTypes::Unchoke {
-            panic!("Expected unchoke message");
+            anyhow::bail!("Peer did not unchoke")
         }
 
         let piece_length = torrent.info.piece_length;
@@ -176,6 +188,8 @@ impl Peer {
         let mut remainder = p_size as i32;
         let mut begin = 0i32;
         let mut hasher = Sha1::new();
+
+        let start = Instant::now();
 
         loop {
             let b_size = BLOCK_SIZE.min(remainder);
@@ -200,10 +214,6 @@ impl Peer {
             begin += b_size;
 
             if remainder == 0 {
-                print!(
-                    "\rLoading chunk {}%...",
-                    ((p_size as i32 - remainder) * 100 / p_size as i32)
-                );
                 break;
             }
         }
@@ -211,8 +221,13 @@ impl Peer {
         let actual_hash = hex::encode(hasher.finalize());
         let expected_hash = torrent.info.hash_by_index(piece_idx);
         if actual_hash != expected_hash {
+            self.stats.record_failure();
             return Err(anyhow::format_err!("Piece hash mismatch"));
         }
+
+        self.stats
+            .record_completion(start.elapsed().as_millis() as u64);
+        self.stats.decrement_active();
 
         Ok(())
     }
@@ -235,7 +250,7 @@ impl Peer {
     }
 
     pub fn can_accept_download(&self, max_concurrency: usize) -> bool {
-        self.is_connected.load(Ordering::Acquire) && self.stats.get_load_score() < max_concurrency
+        self.is_connected() && self.stats.get_load_score() < max_concurrency
     }
 
     pub fn is_connected(&self) -> bool {
@@ -291,21 +306,21 @@ impl PeerStats {
         }
     }
 
-    fn increment_active(&self) {
+    pub fn increment_active(&self) {
         self.active_downloads.fetch_add(1, Ordering::Release);
     }
 
-    fn decrement_active(&self) {
+    pub fn decrement_active(&self) {
         self.active_downloads.fetch_sub(1, Ordering::Release);
     }
 
-    fn record_completion(&self, download_time_ms: u64) {
+    pub fn record_completion(&self, download_time_ms: u64) {
         self.completed_pieces.fetch_add(1, Ordering::Release);
         self.total_download_time_ms
             .fetch_add(download_time_ms, Ordering::Release);
     }
 
-    fn record_failure(&self) {
+    pub fn record_failure(&self) {
         self.failed_pieces.fetch_add(1, Ordering::Release);
     }
 
